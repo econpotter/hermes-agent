@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -196,6 +197,8 @@ class SignalAdapter(BasePlatformAdapter):
         self.require_mention = (bool(_rm_cfg) if _rm_cfg is not None
                                 else (_sig_secret("SIGNAL_REQUIRE_MENTION", "false") or "false").lower() in TRUTHY_STRINGS)
         self.dm_allow_from = set(_parse_comma_list(_sig_secret("SIGNAL_ALLOWED_USERS", "*")))
+        # Typed names that count as a mention of the bot, e.g. "hermes" matches "@hermes" (case-insensitive).
+        self.mention_aliases = [a.lower() for a in _parse_comma_list(_sig_secret("SIGNAL_MENTION_ALIASES", ""))]
         self.client: Optional[httpx.AsyncClient] = None
         self._sse_task: Optional[asyncio.Task] = None
         self._health_monitor_task: Optional[asyncio.Task] = None
@@ -380,9 +383,12 @@ class SignalAdapter(BasePlatformAdapter):
             mentioned_in_text = account_norm and (f"@{account_norm}" in (text or ""))
             mentioned_in_metadata = any(account_norm in (m.get("number"), m.get("uuid"))
                                         for m in (data_message.get("mentions") or []))
-            if not mentioned_in_text and not mentioned_in_metadata:
+            mentioned_by_alias = any(re.search(rf"(?<!\w)@{re.escape(a)}\b", text or "", re.IGNORECASE) for a in self.mention_aliases)
+            if not mentioned_in_text and not mentioned_in_metadata and not mentioned_by_alias:
                 logger.debug("Signal: ignoring group message (require_mention=true, bot not mentioned)")
                 return False, text
+        for alias in self.mention_aliases:
+            text = re.sub(rf"(?<!\w)@{re.escape(alias)}\b", "", text or "", flags=re.IGNORECASE).strip()
         if text and account_norm:
             text = text.replace(f"@{account_norm}", "")
             if bot_uuid := self._recipient_uuid_by_number.get(account_norm):
